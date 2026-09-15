@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require 'stringio'
+
 require_relative 'fake_io'
 
 module Zip
@@ -10,6 +12,10 @@ module Zip
     module AbstractInputStream
       include Enumerable
       include FakeIO
+
+      # How far past a limit `gets` may read to finish a multi-byte character.
+      # `IO` allows itself the same slack; see `extra_limit` in `io.c`.
+      MAX_CHAR_BYTES = 16 # :nodoc:
 
       # Creates a new input stream wrapper.
       #
@@ -109,19 +115,16 @@ module Zip
       #
       # With only integer argument `limit` given, limits the number of bytes
       # in the line; see the Line Limit documentation in the IO class for more
-      # information.
+      # information. As with other Ruby streams, a limit is never allowed to
+      # split a multi-byte character: the line is extended to the end of the
+      # character that the limit falls inside.
       #
       # With arguments `sep` and `limit` given, combines the two behaviors.
       #
       # Optional keyword argument `chomp` specifies whether line separators
       # are to be omitted.
       def gets(sep = $INPUT_RECORD_SEPARATOR, limit = nil, chomp: false) # rubocop:disable Metrics/AbcSize,Metrics/CyclomaticComplexity,Metrics/PerceivedComplexity
-        if sep.nil?
-          return nil if eof?
-
-          @lineno = @lineno.next
-          return read(limit)
-        end
+        encoding = @internal_encoding || @external_encoding
 
         if sep.respond_to?(:to_int)
           limit = sep.to_int
@@ -130,31 +133,45 @@ module Zip
           sep = "#{$INPUT_RECORD_SEPARATOR}#{$INPUT_RECORD_SEPARATOR}"
         end
 
-        encoding = @internal_encoding || @external_encoding
+        limit = nil if limit&.negative?
 
+        return (+'').force_encoding(encoding) if limit&.zero?
+
+        # The separator can straddle two chunks of input, so each search
+        # restarts `sep.bytesize` bytes back.
+        target       = limit && (limit + MAX_CHAR_BYTES)
+        sep_index    = nil
         buffer_index = 0
-        while (sep_index = @output_buffer.index(sep, buffer_index)).nil?
-          break if limit && @output_buffer.bytesize >= limit
+        loop do
+          sep_index = @output_buffer.index(sep, buffer_index) if sep
+          break if sep_index || input_finished? || (target && @output_buffer.bytesize >= target)
 
-          if input_finished?
-            return nil if @output_buffer.empty?
-
-            @lineno = @lineno.next
-            @pos += @output_buffer.bytesize
-            return @output_buffer.slice!(0..).force_encoding(encoding)
-          end
-
-          buffer_index = [buffer_index, @output_buffer.bytesize - sep.bytesize].max
+          buffer_index = [buffer_index, @output_buffer.bytesize - sep.bytesize].max if sep
           @output_buffer << produce_input
         end
 
-        limit ||= @output_buffer.bytesize
-        cut_index = sep_index ? [sep_index + sep.bytesize, limit].min : limit
+        return nil if @output_buffer.empty?
+
+        cut_index = [limit, @output_buffer.bytesize].compact.min
+        cut_index = [sep_index + sep.bytesize, cut_index].min if sep_index
+
+        # A limit must not split a multi-byte character.
+        # `rb_enc_right_char_head`, which `StringIO` uses for this, isn't exposed to Ruby
+        # so let a `StringIO` find the boundary for us.
+        # Binary data has no multi-byte characters to split, so it skips this
+        # and cuts exactly on the limit.
+        if limit && encoding != Encoding::ASCII_8BIT
+          window = @output_buffer.byteslice(0, cut_index + MAX_CHAR_BYTES)
+          reader = ::StringIO.new(window.force_encoding(encoding))
+          reader.gets(nil, cut_index)
+          cut_index = reader.pos
+        end
+
         @lineno = @lineno.next
         @pos += cut_index
         data = @output_buffer.slice!(0, cut_index)
-        data&.chomp!(sep) if chomp
-        data&.force_encoding(encoding)
+        data.chomp!(sep) if chomp && sep
+        data.force_encoding(encoding)
       end
 
       def ungetc(byte) # :nodoc:
