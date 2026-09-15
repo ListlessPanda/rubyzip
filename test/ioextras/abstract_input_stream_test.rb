@@ -20,6 +20,9 @@ class AbstractInputStreamTest < Minitest::Test
     'rest'
   ].freeze
 
+  # 'é' is two bytes when encoded as UTF-8; '👍' is four.
+  UTF8_STRING = "ééé👍abc\nsecond line\n"
+
   class TestAbstractInputStream
     include ::Zip::IOExtras::AbstractInputStream
 
@@ -38,6 +41,25 @@ class AbstractInputStreamTest < Minitest::Test
 
     def input_finished?
       @contents[@read_ptr].nil?
+    end
+  end
+
+  # Hands out its chunks one at a time. An empty final chunk mimics
+  # Inflater#read when the deflate end-of-stream marker arrives on its own.
+  class ChunkedInputStream
+    include Zip::IOExtras::AbstractInputStream
+
+    def initialize(chunks, **opts)
+      super(**opts)
+      @chunks = chunks.map(&:b)
+    end
+
+    def produce_input(_maxlen = nil)
+      @chunks.shift
+    end
+
+    def input_finished?
+      @chunks.empty?
     end
   end
 
@@ -217,6 +239,112 @@ class AbstractInputStreamTest < Minitest::Test
     assert_equal(io.gets&.encoding, Encoding::UTF_8)
   end
 
+  def test_gets_with_nil_sep_and_limit_does_not_split_multibyte_chars
+    {
+      1 => 'é', 2 => 'é', 3 => 'éé', 4 => 'éé', 5 => 'ééé',
+      7 => 'ééé👍', 11 => 'ééé👍a'
+    }.each do |limit, expected|
+      assert_equal(expected, new_utf8_stream.gets(nil, limit), "limit #{limit}")
+    end
+  end
+
+  def test_gets_with_limit_does_not_split_multibyte_chars
+    { 1 => 'é', 3 => 'éé', 7 => 'ééé👍' }.each do |limit, expected|
+      assert_equal(expected, new_utf8_stream.gets(limit), "limit #{limit}")
+    end
+  end
+
+  def test_gets_with_sep_and_limit_does_not_split_multibyte_chars
+    { 1 => 'é', 3 => 'éé', 7 => 'ééé👍' }.each do |limit, expected|
+      assert_equal(expected, new_utf8_stream.gets("\n", limit), "limit #{limit}")
+    end
+  end
+
+  def test_gets_with_sep_and_large_limit_keeps_multibyte_line_intact
+    io = new_utf8_stream
+
+    assert_equal("ééé👍abc\n", io.gets("\n", 100))
+    assert_equal("second line\n", io.gets("\n", 100))
+    assert_equal(2, io.lineno)
+  end
+
+  def test_gets_with_limit_is_consistent_across_calls
+    io = new_utf8_stream
+
+    assert_equal('éé', io.gets(nil, 3))
+    assert_equal(4, io.pos)
+    assert_equal('é👍', io.gets(nil, 3))
+    assert_equal(10, io.pos)
+    assert_equal('abc', io.gets(nil, 3))
+    assert_equal(13, io.pos)
+    assert_equal(3, io.lineno)
+  end
+
+  def test_gets_with_limit_does_not_split_utf16_chars
+    io = TestAbstractInputStream.new('aéb'.encode('UTF-16LE').b, internal_encoding: Encoding::UTF_16LE)
+
+    assert_equal('a'.encode('UTF-16LE'), io.gets(nil, 1))
+    assert_equal(2, io.pos)
+    assert_equal('éb'.encode('UTF-16LE'), io.gets(nil, 3))
+    assert_equal(6, io.pos)
+  end
+
+  def test_gets_with_limit_completes_char_at_end_of_stream
+    io = TestAbstractInputStream.new('é'.b, internal_encoding: Encoding::UTF_8)
+
+    assert_equal('é', io.gets(nil, 1))
+    assert_predicate(io, :eof?)
+  end
+
+  def test_gets_with_limit_returns_truncated_char_at_end_of_stream
+    io = TestAbstractInputStream.new("\xC3".b, internal_encoding: Encoding::UTF_8)
+
+    assert_equal("\xC3".b, io.gets(nil, 1).b)
+    assert_predicate(io, :eof?)
+  end
+
+  def test_gets_with_limit_does_not_extend_over_invalid_bytes
+    io = TestAbstractInputStream.new("\xFF\xFEabc".b, internal_encoding: Encoding::UTF_8)
+
+    assert_equal("\xFF".b, io.gets(nil, 1).b)
+    assert_equal("\xFE".b, io.gets(nil, 1).b)
+  end
+
+  def test_gets_with_limit_cuts_on_byte_boundaries_when_binary
+    io = TestAbstractInputStream.new(UTF8_STRING.b)
+
+    assert_equal("\xC3".b, io.gets(nil, 1))
+    assert_equal(1, io.pos)
+  end
+
+  def test_gets_with_zero_limit
+    io = TestAbstractInputStream.new(TEST_STRING)
+
+    assert_equal('', io.gets(0))
+    assert_equal(0, io.lineno)
+    assert_equal(0, io.pos)
+
+    io.read
+    assert_equal('', io.gets(0))
+    assert_nil(io.gets)
+  end
+
+  def test_gets_returns_nil_when_final_chunk_is_empty
+    io = ChunkedInputStream.new(["Hello\n", ''])
+
+    assert_equal("Hello\n", io.gets)
+    assert_nil(io.gets)
+    assert_equal(1, io.lineno)
+    assert_predicate(io, :eof?)
+  end
+
+  def test_gets_with_negative_limit_is_unlimited
+    io = TestAbstractInputStream.new(TEST_STRING)
+
+    assert_equal(TEST_LINES[0], io.gets(-1))
+    assert_equal(TEST_LINES[1..].join, io.gets(nil, -1))
+  end
+
   def test_each
     io = TestAbstractInputStream.new(TEST_STRING)
 
@@ -371,6 +499,10 @@ class AbstractInputStreamTest < Minitest::Test
   end
 
   private
+
+  def new_utf8_stream
+    TestAbstractInputStream.new(UTF8_STRING.b, internal_encoding: Encoding::UTF_8)
+  end
 
   def line_tests(method_name: :gets)
     io = TestAbstractInputStream.new(TEST_STRING)
