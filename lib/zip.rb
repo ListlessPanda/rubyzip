@@ -54,6 +54,7 @@ module Zip
                 :warn_invalid_date,
                 :case_insensitive_match,
                 :force_entry_names_encoding,
+                :preload_extra_fields,
                 :validate_entry_sizes,
                 :validate_declared_number_of_entries
 
@@ -78,6 +79,7 @@ module Zip
     @warn_invalid_date = true
     @case_insensitive_match = false
     @force_entry_names_encoding = nil
+    @preload_extra_fields = true
     @validate_entry_sizes = true
     @validate_declared_number_of_entries = false # Set this to `true` in v4.0.0?
   end
