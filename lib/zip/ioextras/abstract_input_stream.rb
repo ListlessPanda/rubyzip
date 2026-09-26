@@ -1,7 +1,5 @@
 # frozen_string_literal: true
 
-require 'stringio'
-
 require_relative 'fake_io'
 
 module Zip
@@ -156,15 +154,8 @@ module Zip
         cut_index = [sep_index + sep.bytesize, cut_index].min if sep_index
 
         # A limit must not split a multi-byte character.
-        # `rb_enc_right_char_head`, which `StringIO` uses for this, isn't exposed to Ruby
-        # so let a `StringIO` find the boundary for us.
-        # Binary data has no multi-byte characters to split, so it skips this
-        # and cuts exactly on the limit.
         if limit && encoding != Encoding::ASCII_8BIT
-          window = @output_buffer.byteslice(0, cut_index + MAX_CHAR_BYTES)
-          reader = ::StringIO.new(window.force_encoding(encoding))
-          reader.gets(nil, cut_index)
-          cut_index = reader.pos
+          cut_index = char_safe_cut_index(cut_index, encoding)
         end
 
         @lineno = @lineno.next
@@ -232,6 +223,23 @@ module Zip
 
       # Alias for compatibility. Remove for version 4.
       alias eof eof? # :nodoc:
+
+      private
+
+      # Finds the byte offset of the end of whichever character `cut_index`
+      # falls inside, so a `gets` limit never splits a multi-byte character.
+      # `each_char` locates boundaries the same way `rb_enc_right_char_head`
+      # does, treating invalid/truncated bytes as one-byte "characters" too
+      # — unlike a Regexp match/scan, which raises `ArgumentError` on any
+      # invalid byte anywhere in the window, even ones the match ignores.
+      def char_safe_cut_index(cut_index, encoding)
+        window = @output_buffer.byteslice(0, cut_index + MAX_CHAR_BYTES).force_encoding(encoding)
+        window.each_char.reduce(0) do |pos, char|
+          break pos if pos >= cut_index
+
+          pos + char.bytesize
+        end
+      end
     end
   end
 end
