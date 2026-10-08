@@ -3,6 +3,8 @@
 module Zip
   # An entry as the central directory describes it.
   module CentralDirectoryEntry # :nodoc:all
+    attr_accessor :local_extra_field_deferred
+
     def unpack_c_dir_entry(buf) # :nodoc:
       @header_signature,
         @version, # version of encoding software
@@ -151,6 +153,29 @@ module Zip
     def cdir_header_size # :nodoc:
       CDIR_ENTRY_STATIC_HEADER_LENGTH + name_size +
         (@extra ? @extra.c_dir_size : 0) + comment_size
+    end
+
+    def load_local_extra_field
+      return unless @local_extra_field_deferred
+
+      get_raw_input_stream do |io|
+        position = io.tell
+        begin
+          io.seek(local_header_offset, IO::SEEK_SET)
+          merge_local_extra_field(::Zip::Entry.read_local_entry(io))
+        ensure
+          io.seek(position, IO::SEEK_SET)
+        end
+      end
+    end
+
+    private
+
+    def merge_local_extra_field(local_entry)
+      return unless @local_extra_field_deferred && local_entry
+
+      @local_extra_field_deferred = false
+      read_extra_field(local_entry.extra.to_local_bin, local: true)
     end
   end
 end

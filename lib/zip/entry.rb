@@ -44,6 +44,7 @@ module Zip
     def set_default_vars_values # :nodoc:
       @local_header_offset      = 0
       @local_header_size        = nil # not known until local entry is created or read
+      @local_extra_field_deferred = false
       @internal_file_attributes = 1
       @external_file_attributes = 0
       @header_signature         = ::Zip::CENTRAL_DIRECTORY_ENTRY_SIGNATURE
@@ -537,7 +538,7 @@ module Zip
       else
         zis = ::Zip::InputStream.new(@zipfile, offset: local_header_offset, decrypter: decrypter)
         zis.instance_variable_set(:@complete_entry, self)
-        zis.get_next_entry
+        merge_local_extra_field(zis.get_next_entry)
         if block
           begin
             yield(zis)
